@@ -1,11 +1,12 @@
 mod basic;
 mod case_options;
+mod rfc0036;
 mod rfc0221;
 mod rfc0222;
 mod rfc0223;
 mod rfc0224;
 mod rfc0234;
-mod rfc0240;
+mod rfc0240; // https://github.com/nervosnetwork/rfcs/pull/240
 
 use case_options::CaseOptions;
 use ckb_testkit::Node;
@@ -28,6 +29,8 @@ pub fn all_cases() -> Vec<Box<dyn Case>> {
         Box::new(rfc0234::discovery::RFC0234AfterSwitchDiscovery),
         Box::new(rfc0240::before_switch::RFC0240BeforeSwitch),
         Box::new(rfc0240::after_switch::RFC0240AfterSwitch),
+        Box::new(rfc0036::v2019::RFC0036V2019),
+        Box::new(rfc0036::v2021::RFC0036V2021),
     ]
 }
 
