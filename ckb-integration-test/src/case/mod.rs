@@ -5,6 +5,7 @@ mod rfc0035;
 mod rfc0034;
 mod rfc0032;
 mod rfc0031;
+mod rfc0029;
 mod rfc0221;
 mod rfc0222;
 mod rfc0223;
@@ -46,6 +47,8 @@ pub fn all_cases() -> Vec<Box<dyn Case>> {
         Box::new(rfc0031::v2021::RFC0031V2021),
         Box::new(rfc0030::v2019::RFC0030V2019),
         Box::new(rfc0030::v2021::RFC0030V2021),
+        Box::new(rfc0029::v2019::RFC0029V2019),
+        Box::new(rfc0029::v2021::RFC0029V2021),
     ]
 }
 
