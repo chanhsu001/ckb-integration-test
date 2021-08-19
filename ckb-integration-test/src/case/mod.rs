@@ -13,6 +13,7 @@ mod rfc0224;
 mod rfc0240;
 mod rfc0234;
 mod rfc0030;
+mod rfc0028;
 
 use case_options::CaseOptions;
 use ckb_testkit::Node;
@@ -49,6 +50,9 @@ pub fn all_cases() -> Vec<Box<dyn Case>> {
         Box::new(rfc0030::v2021::RFC0030V2021),
         Box::new(rfc0029::v2019::RFC0029V2019),
         Box::new(rfc0029::v2021::RFC0029V2021),
+        Box::new(rfc0028::v2019::RFC0028V2019),
+        Box::new(rfc0028::v2021::RFC0028V2021),
+        Box::new(rfc0028::chained::RFC0028Chained),
     ]
 }
 
