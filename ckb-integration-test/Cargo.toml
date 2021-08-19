@@ -13,6 +13,7 @@ ckb-jsonrpc-types = { git = "https://github.com/nervosnetwork/ckb", rev = "603a8
 ckb-types = { git = "https://github.com/nervosnetwork/ckb", rev = "603a811" }
 ckb-logger-config = { git = "https://github.com/nervosnetwork/ckb", rev = "603a811" }
 ckb-logger-service = { git = "https://github.com/nervosnetwork/ckb", rev = "603a811" }
+ckb-crypto = { git = "https://github.com/nervosnetwork/ckb.git", rev = "603a811" }
 lazy_static = "1.4.0"
 log = "0.4"
 ckb-testkit = { path = "../ckb-testkit" }

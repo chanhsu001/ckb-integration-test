@@ -339,6 +339,7 @@ dependencies = [
 name = "ckb-integration-test"
 version = "0.0.1"
 dependencies = [
+ "ckb-crypto",
  "ckb-jsonrpc-types 0.100.0-pre",
  "ckb-logger-config",
  "ckb-logger-service",
