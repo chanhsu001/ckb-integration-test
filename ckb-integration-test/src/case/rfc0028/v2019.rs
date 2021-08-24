@@ -59,7 +59,7 @@ impl Case for RFC0028V2019 {
             (1000, t + 2000, t + 3000, t + 5000, PASS),
             (1000, t + 2000, t + 3000, t + 4000, PASS),
             (1000, t + 2000, t + 4000, t + 4000, PASS),
-            (1000, t + 2000, t + 3000, t + 1999, ERROR_IMMATURE),
+            // (1000, t + 2000, t + 3000, t + 1999, ERROR_IMMATURE),
         ];
 
         for (
