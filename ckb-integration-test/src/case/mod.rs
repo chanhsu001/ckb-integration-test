@@ -1,19 +1,19 @@
 mod basic;
 mod case_options;
-mod rfc0036;
-mod rfc0035;
-mod rfc0034;
-mod rfc0032;
-mod rfc0031;
+mod rfc0028;
 mod rfc0029;
+mod rfc0030;
+mod rfc0031;
+mod rfc0032;
+mod rfc0034;
+mod rfc0035;
+mod rfc0036;
 mod rfc0221;
 mod rfc0222;
 mod rfc0223;
 mod rfc0224;
-mod rfc0240;
 mod rfc0234;
-mod rfc0030;
-mod rfc0028;
+mod rfc0240;
 
 use case_options::CaseOptions;
 use ckb_testkit::Node;
