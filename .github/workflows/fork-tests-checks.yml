@@ -112,14 +112,11 @@ jobs:
         run: |
           cd ./ckb-integration-test
           chmod +x ./testdata/bin/*
-          ./testdata/bin/ckb-integration-test run \
-            --ckb2019 testdata/bin/ckb_v0.43.2-${{ runner.os }} \
-            --ckb2021 testdata/bin/ckb
+          ./testdata/bin/ckb-integration-test run --ckb2021 testdata/bin/ckb
       ## TODO: testdata/db/ is only for Linux and macOS
       # - if: ${{ runner.os == 'Windows' }}
       #   run: |
       #     cd ./ckb-integration-test
       #     chmod +x ./testdata/bin/*
       #     ./testdata/bin/ckb-integration-test.exe run \
-      #       --ckb2019 testdata/bin/ckb_v0.43.2-${{ runner.os }} \
       #       --ckb2021 testdata/bin/ckb.exe
