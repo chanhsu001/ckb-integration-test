@@ -2,6 +2,7 @@ mod basic;
 mod case_options;
 mod rfc0036;
 mod rfc0035;
+mod rfc0034;
 mod rfc0221;
 mod rfc0222;
 mod rfc0223;
@@ -35,6 +36,7 @@ pub fn all_cases() -> Vec<Box<dyn Case>> {
         Box::new(rfc0035::relay_transaction::RFC0035V2021RelayTransaction),
         Box::new(rfc0035::connection::RFC0035V2021Connection),
         Box::new(rfc0035::discovery::RFC0035V2021Discovery),
+        Box::new(rfc0034::rfc0034::RFC0034),
     ]
 }
 
