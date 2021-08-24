@@ -79,6 +79,7 @@ impl Deployer {
 
         // Save cell-meta inside deployer
         let out_point = OutPoint::new(tx.hash(), 0);
+        let _ = node.indexer();
         let cell_meta = node.get_cell_meta(out_point).expect(&format!(
             "deployer should already committed tx {:#x}",
             tx.hash()
