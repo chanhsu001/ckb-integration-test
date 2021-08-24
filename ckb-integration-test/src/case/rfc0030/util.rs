@@ -73,11 +73,11 @@ pub fn run_rfc0030_case(
     if expected.is_ok() && node.rpc_client().ckb2021 {
         let instructions = vec![
             BuildInstruction::Propose {
-                block_number: node.get_tip_block_number() + 1,
+                template_number: node.get_tip_block_number() + 1,
                 proposal_short_id: tx.proposal_short_id(),
             },
             BuildInstruction::Commit {
-                block_number: node.get_tip_block_number() + 3,
+                template_number: node.get_tip_block_number() + 3,
                 transaction: tx.clone(),
             },
         ];
