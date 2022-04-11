@@ -1,5 +1,7 @@
 # CKB Sync-Mainnet Test
 
+This job will compile ckb locally, please use `ubuntu-focal-20.04-amd64` to run the scripts.
+
 Required environment variables:
 
 - `AWS_ACCESS_KEY`
