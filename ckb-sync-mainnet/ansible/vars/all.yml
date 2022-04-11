@@ -1,5 +1,5 @@
 # Keep consistent with https://github.com/keroro520/ansible-ckb/blob/master/defaults/main.yml
-ckb_sync_target_number: 12000
+# ckb_sync_target_number: 12000
 ckb_workspace: "/var/lib/ckb"
 ckb_service: ckb
 ckb_data_dir: "{{ ckb_workspace }}/data"
