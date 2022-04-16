@@ -1,39 +1,34 @@
 extern crate core;
 
-use crate::mining::mine;
-use crate::node::Node;
-use crate::utils::find_available_port;
+use std::env;
+use std::panic;
+use std::path::PathBuf;
+use std::process::exit;
+
 use ckb_chain_spec::consensus::TYPE_ID_CODE_HASH;
 use ckb_crypto::secp::{Privkey, Pubkey};
-use ckb_growth::MAX_TXS_IN_NORMAL_MODE;
 use ckb_hash::{blake2b_256, new_blake2b};
-use ckb_jsonrpc_types::{Block, CellWithStatus, Transaction};
+use ckb_jsonrpc_types::CellWithStatus;
 use ckb_system_scripts::BUNDLED_CELL;
-use ckb_types::core::error::TransactionErrorSource::OutputsData;
-use ckb_types::core::{BlockNumber, DepType, EpochNumberWithFraction};
 use ckb_types::{
     bytes::Bytes,
     core::{
-        capacity_bytes,
-        cell::{resolve_transaction, OverlayCellProvider, TransactionsProvider},
-        BlockBuilder, BlockView, Capacity, HeaderView, ScriptHashType, TransactionBuilder,
+        BlockView, Capacity, ScriptHashType, TransactionBuilder,
         TransactionView,
     },
-    h160, h256, packed,
-    packed::{
-        Byte32, CellDep, CellInput, CellOutput, OutPoint, ProposalShortId, Script, WitnessArgs,
-    },
+    h256, H256,
+    packed,
+    packed::{CellDep, CellInput, CellOutput, OutPoint, Script, WitnessArgs},
     prelude::*,
-    H160, H256, U256,
 };
+use ckb_types::core::DepType;
 use clap::{Args, Parser, Subcommand};
 use lazy_static::lazy_static;
-use std::borrow::Borrow;
-use std::cell::Cell;
-use std::env;
-use std::panic;
-use std::path::{Display, PathBuf};
-use std::process::exit;
+
+use ckb_growth::MAX_TXS_IN_NORMAL_MODE;
+
+use crate::mining::mine;
+use crate::node::Node;
 
 mod mining;
 mod node;
@@ -213,7 +208,7 @@ impl std::fmt::Display for Account {
 
 // const MIN_FEE_RATE: u64 = 1_000;
 // disable FEE_RATE for simplification
-const MIN_FEE_RATE: u64 = 1_000;
+const MIN_FEE_RATE: u64 = 0;
 const MIN_CELL_CAP: u64 = 90_00_000_000;
 const MILLION_HEIGHT: u64 = 1_000_000;
 
@@ -262,7 +257,6 @@ fn get_livecellcnt_txcnt(height: u64) -> (LiveCellCnt, TxCnt) {
 
 /// get secp256k1 sighash CellDeps
 pub fn secp256k1_cell_dep(genesis_block: &BlockView) -> Vec<CellDep> {
-    use ckb_types::prelude::Pack;
     let mut v = vec![];
     let op = OutPoint::new_builder()
         .tx_hash(
@@ -312,13 +306,6 @@ fn attach_witness(mut tx: TransactionView, signed_accounts: &[Account]) -> Trans
         hasher.update(tx_hash.as_slice());
         hasher.update(&witness_len.to_le_bytes());
         hasher.update(witness.as_slice());
-        // Todo: not sure if it's correct?
-        // for _ in 1..signed_accounts.len() {
-        //     let more_witness = Bytes::new();
-        //     let more_witness_len = more_witness.len() as u64;
-        //     hasher.update(&more_witness_len.to_le_bytes());
-        //     hasher.update(&more_witness);
-        // }
         let mut buf = [0u8; 32];
         hasher.finalize(&mut buf);
         H256::from(buf)
@@ -423,7 +410,7 @@ fn prepare_two_two_txs(
     txs_cnt: u64,
     secp_cell_deps: &Vec<CellDep>,
 ) -> TransactionView {
-    let height = node.get_tip_block_number();
+    let parent_height = node.get_tip_block_number();
 
     // get input cell capacity
     // fetch cell capacity from genesis tx or previous million height block tx
@@ -440,7 +427,8 @@ fn prepare_two_two_txs(
         );
         input = CellInput::new(OutPoint::new(tx.hash(), 8), 0);
     } else {
-        let previous_million_block = node.get_block_by_number(height - MILLION_HEIGHT);
+        // Todo: not test yet
+        let previous_million_block = node.get_block_by_number(parent_height - MILLION_HEIGHT);
         let txs = previous_million_block.transactions();
         let tx = txs.get(2).expect("get 1st tx");
         cell = node.rpc_client().get_live_cell(
@@ -453,6 +441,7 @@ fn prepare_two_two_txs(
         );
     }
 
+    // subtract FEE_RATE and 2*txs_cnt cell's capacity
     let input_cell_capacity = cell.cell.expect("get cell info").output.capacity;
 
     let total = Capacity::zero()
@@ -461,9 +450,9 @@ fn prepare_two_two_txs(
     let rest = total
         .safe_sub(MIN_FEE_RATE as u64)
         .expect("for min_fee_rate");
-    let rest = rest
-        .safe_sub(MIN_CELL_CAP * txs_cnt * 2)
-        .expect("sub live cells capacity");
+    let cellcap = Capacity::zero().safe_add(MIN_CELL_CAP).unwrap();
+    let total_cellcap = cellcap.safe_mul(txs_cnt * 2).unwrap();
+    let rest = rest.safe_sub(total_cellcap).expect("sub cells capacity");
     accounts[0].cell_cap = rest.as_u64();
 
     let mut outputs = vec![];
@@ -506,7 +495,7 @@ fn prepare_two_two_txs(
     attach_witness(tx, &accounts)
 }
 
-/// create tx to generate enough cells for all 2in2out tx in expansion mode
+/// create 2in2out tx in expansion mode
 pub fn create_two_two_txs(
     parent: &BlockView,
     accounts: &mut Vec<Account>,
@@ -514,6 +503,7 @@ pub fn create_two_two_txs(
     secp_cell_deps: &Vec<CellDep>,
 ) -> Vec<TransactionView> {
     let mut txs = vec![];
+
     //split accounts, [A, B, C, D] into [A, B] and [C, D]
     // [A, B] for 2 input cell of previous tx, and 2 output cells is locked by [C, D]
     let (input_acc, output_acc) = accounts.split_at(accounts.len() / 2);
@@ -525,15 +515,17 @@ pub fn create_two_two_txs(
             // the 2nd tx in parent block is input cell for this tx
             let tx = p_txs.get(tx_index + 2).expect("get previous transaction");
             vec![
-                CellInput::new(OutPoint::new(tx.hash(), 0), parent_block_number),
                 CellInput::new(OutPoint::new(tx.hash(), 1), parent_block_number),
+                CellInput::new(OutPoint::new(tx.hash(), 2), parent_block_number),
             ]
         };
 
-        let total = Capacity::zero()
-            .safe_add(input_acc[0].cell_cap)
+        // we set fee_rate to zero
+        // 2in2out input/output cell are always MIN_CELL_CAP
+        let cell_cap = Capacity::zero()
+            .safe_add(MIN_CELL_CAP)
             .expect("origin capacity");
-        let rest = total
+        let rest = cell_cap
             .safe_sub(MIN_FEE_RATE as u64)
             .expect("for min_fee_rate");
 
@@ -638,14 +630,13 @@ fn normal_expansion(data_dir: &PathBuf) {
         node.submit_transaction(&live_cells_tx);
 
         // prepare 2in2out input cells
-        // let prepare_2in2out =
-        //     prepare_two_two_txs(&node, true, &mut two_two_accounts, txs_cnt, &cell_dep);
-        // node.submit_transaction(&prepare_2in2out);
+        let prepare_2in2out =
+            prepare_two_two_txs(&node, true, &mut two_two_accounts, txs_cnt, &cell_dep);
+        node.submit_transaction(&prepare_2in2out);
 
         let builder = block
             .as_advanced_builder()
-            // .transactions(vec![live_cells_tx, prepare_2in2out]);
-            .transactions(vec![live_cells_tx]);
+            .transactions(vec![live_cells_tx, prepare_2in2out]);
 
         // disable verify, submit block
         node.process_block_without_verify(&builder.build(), false);
@@ -662,24 +653,25 @@ fn normal_expansion(data_dir: &PathBuf) {
         let live_cells_tx = gen_live_cells(&parent, &mut cellbase_account, livecell_cnt, &cell_dep);
         node.submit_transaction(&live_cells_tx);
 
-        // let two_two_txs = create_two_two_txs(&parent, &mut two_two_accounts, txs_cnt, &cell_dep);
-        //
-        // // prepare for next transfer cell back
-        // // turn [A, B, C, D] into [C, D, A, B], vice versa
-        // two_two_accounts.swap(0, 2);
-        // two_two_accounts.swap(1, 3);
-        //
-        // for tx in &two_two_txs {
-        //     node.submit_transaction(&tx);
-        // }
+        let two_two_txs = create_two_two_txs(&parent, &mut two_two_accounts, txs_cnt, &cell_dep);
+
+        for tx in &two_two_txs {
+            println!("submit 2in2out tx!");
+            node.submit_transaction(&tx);
+        }
 
         let builder = block
             .as_advanced_builder()
-            .transactions(vec![live_cells_tx]);
-        // .transactions(two_two_txs);
+            .transactions(vec![live_cells_tx])
+            .transactions(two_two_txs);
 
         //disable verify, submit block
         node.process_block_without_verify(&builder.build(), false);
+
+        // prepare for next transfer cell back
+        // turn [A, B, C, D] into [C, D, A, B], vice versa
+        two_two_accounts.swap(0, 2);
+        two_two_accounts.swap(1, 3);
     }
 }
 
