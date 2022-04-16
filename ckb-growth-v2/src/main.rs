@@ -402,7 +402,7 @@ pub fn gen_live_cells(
 /// prepare input cells for 2in2out transactions
 /// it will be called once at every million height beginning
 /// input cell is from previous million block output cell #0
-/// output cells: #0 is for next million input cell, #1...m(m==2in2out_tx_cnt * 2) is for 2in2out
+/// output cells: #0...m-1(m==2in2out_tx_cnt * 2) is for 2in2out, #m is for next million input cell
 fn prepare_two_two_txs(
     node: &Node,
     if_first: bool,
@@ -458,13 +458,6 @@ fn prepare_two_two_txs(
     let mut outputs = vec![];
     let owner_account = &accounts[0];
 
-    outputs.push(
-        CellOutput::new_builder()
-            .capacity(rest.as_u64().pack())
-            .lock(owner_account.lock_args.clone())
-            .build(),
-    );
-
     for _ in 0..txs_cnt {
         let (input_accounts, _) = accounts.split_at(accounts.len() / 2);
         (0..2 as usize)
@@ -478,6 +471,12 @@ fn prepare_two_two_txs(
                 );
             });
     }
+    outputs.push(
+        CellOutput::new_builder()
+            .capacity(rest.as_u64().pack())
+            .lock(owner_account.lock_args.clone())
+            .build(),
+    );
 
     let mut outputs_data = vec![];
     (0..=2 * txs_cnt as u16).for_each(|i| {
@@ -515,8 +514,8 @@ pub fn create_two_two_txs(
             // the 2nd tx in parent block is input cell for this tx
             let tx = p_txs.get(tx_index + 2).expect("get previous transaction");
             vec![
+                CellInput::new(OutPoint::new(tx.hash(), 0), parent_block_number),
                 CellInput::new(OutPoint::new(tx.hash(), 1), parent_block_number),
-                CellInput::new(OutPoint::new(tx.hash(), 2), parent_block_number),
             ]
         };
 
@@ -643,8 +642,8 @@ fn normal_expansion(data_dir: &PathBuf) {
     }
 
     // #every block
-    {
-        let height = 21;
+    for height in 21..23 {
+        println!("preparing txs at height:{}", height);
         let (livecell_cnt, txs_cnt) = get_livecellcnt_txcnt(height);
 
         let parent = node.get_tip_block();
@@ -652,6 +651,7 @@ fn normal_expansion(data_dir: &PathBuf) {
 
         let live_cells_tx = gen_live_cells(&parent, &mut cellbase_account, livecell_cnt, &cell_dep);
         node.submit_transaction(&live_cells_tx);
+        println!("gen_live_cells txs are done");
 
         let two_two_txs = create_two_two_txs(&parent, &mut two_two_accounts, txs_cnt, &cell_dep);
 
@@ -659,6 +659,7 @@ fn normal_expansion(data_dir: &PathBuf) {
             println!("submit 2in2out tx!");
             node.submit_transaction(&tx);
         }
+        println!("2in2out txs are done");
 
         let builder = block
             .as_advanced_builder()
@@ -667,6 +668,7 @@ fn normal_expansion(data_dir: &PathBuf) {
 
         //disable verify, submit block
         node.process_block_without_verify(&builder.build(), false);
+        println!("block at height {} are done", height);
 
         // prepare for next transfer cell back
         // turn [A, B, C, D] into [C, D, A, B], vice versa
