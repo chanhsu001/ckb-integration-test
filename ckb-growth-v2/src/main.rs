@@ -9,19 +9,18 @@ use ckb_chain_spec::consensus::TYPE_ID_CODE_HASH;
 use ckb_crypto::secp::{Privkey, Pubkey};
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_jsonrpc_types::CellWithStatus;
+use ckb_logger::{debug, info};
+use ckb_logger::internal::log;
 use ckb_system_scripts::BUNDLED_CELL;
+use ckb_types::core::DepType;
 use ckb_types::{
     bytes::Bytes,
-    core::{
-        BlockView, Capacity, ScriptHashType, TransactionBuilder,
-        TransactionView,
-    },
-    h256, H256,
-    packed,
+    core::{BlockView, Capacity, ScriptHashType, TransactionBuilder, TransactionView},
+    h256, packed,
     packed::{CellDep, CellInput, CellOutput, OutPoint, Script, WitnessArgs},
     prelude::*,
+    H256,
 };
-use ckb_types::core::DepType;
 use clap::{Args, Parser, Subcommand};
 use lazy_static::lazy_static;
 
@@ -60,13 +59,6 @@ pub enum GrowthSubCommand {
 #[derive(Args)]
 #[clap()]
 pub struct CmdRun {
-    #[clap(short, long, default_value = "./data")]
-    /// Data directory
-    data_dir: PathBuf,
-
-    // #[clap(short, long)]
-    // /// How long it takes to mine a block
-    // tx_interval_ms: u64,
     #[clap(short, long)]
     /// normal mode data expansion in 5 year
     normal_expansion: bool,
@@ -400,17 +392,18 @@ pub fn gen_live_cells(
 }
 
 /// prepare input cells for 2in2out transactions
-/// it will be called once at every million height beginning
+/// it will be called once at #20 height or every million height beginning
 /// input cell is from previous million block output cell #0
 /// output cells: #0...m-1(m==2in2out_tx_cnt * 2) is for 2in2out, #m is for next million input cell
 fn prepare_two_two_txs(
     node: &Node,
     if_first: bool,
+    owner_account: &mut Account,
     accounts: &mut Vec<Account>,
     txs_cnt: u64,
     secp_cell_deps: &Vec<CellDep>,
 ) -> TransactionView {
-    let parent_height = node.get_tip_block_number();
+    let curr_height = node.get_tip_block_number() + 1;
 
     // get input cell capacity
     // fetch cell capacity from genesis tx or previous million height block tx
@@ -428,15 +421,16 @@ fn prepare_two_two_txs(
         input = CellInput::new(OutPoint::new(tx.hash(), 8), 0);
     } else {
         // Todo: not test yet
-        let previous_million_block = node.get_block_by_number(parent_height - MILLION_HEIGHT);
+        let previous_million_block = node.get_block_by_number(curr_height - MILLION_HEIGHT);
         let txs = previous_million_block.transactions();
-        let tx = txs.get(2).expect("get 1st tx");
+        let tx = txs.get(txs.len() - 1).expect("get last tx");
+        let output_index = tx.outputs().len() - 1;
         cell = node.rpc_client().get_live_cell(
-            ckb_jsonrpc_types::OutPoint::from(OutPoint::new(tx.hash(), 0)),
+            ckb_jsonrpc_types::OutPoint::from(OutPoint::new(tx.hash(), output_index as u32)),
             true,
         );
         input = CellInput::new(
-            OutPoint::new(tx.hash(), 0),
+            OutPoint::new(tx.hash(), output_index as u32),
             previous_million_block.header().number(),
         );
     }
@@ -453,10 +447,11 @@ fn prepare_two_two_txs(
     let cellcap = Capacity::zero().safe_add(MIN_CELL_CAP).unwrap();
     let total_cellcap = cellcap.safe_mul(txs_cnt * 2).unwrap();
     let rest = rest.safe_sub(total_cellcap).expect("sub cells capacity");
-    accounts[0].cell_cap = rest.as_u64();
+    // accounts[0].cell_cap = rest.as_u64();
+    owner_account.cell_cap = rest.as_u64();
 
     let mut outputs = vec![];
-    let owner_account = &accounts[0];
+    // let owner_account = &accounts[0];
 
     for _ in 0..txs_cnt {
         let (input_accounts, _) = accounts.split_at(accounts.len() / 2);
@@ -567,7 +562,6 @@ fn main() {
 }
 
 fn cmd_run(matches: &CmdRun) {
-    let data_dir = &matches.data_dir;
     let normal_mode = matches.normal_expansion;
     let maximum_mode = matches.maximum_expansion;
 
@@ -577,15 +571,14 @@ fn cmd_run(matches: &CmdRun) {
     }
     if normal_mode == true {
         println!("normal mode in 5 years data expansion");
-        normal_expansion(data_dir);
+        normal_expansion();
     } else {
         println!("maximum mode in 1 years data expansion");
-        //maximum_expansion(data_dir, t_tx_interval);
+        //maximum_expansion();
     }
 }
 
-fn normal_expansion(data_dir: &PathBuf) {
-    // let mut node = Node::new(data_dir.clone());
+fn normal_expansion() {
     let node = Node::new(PathBuf::from("./"));
 
     let genesis_block = node.get_tip_block();
@@ -601,80 +594,120 @@ fn normal_expansion(data_dir: &PathBuf) {
 
     // the account embedded accounts in Dev chain
     // base account, derive more accounts for building 2in2out tx
-    let owner_account = Account::new(
+    let mut owner_account = Account::new(
         h256!("0x63d86723e08f0f813a36ce6aa123bb2289d90680ae1e99d4de8cdb334553f24d"),
         5_198_735_037_00000000,
     );
 
     // prepare 4 accounts and put them into 2in2out_accounts
-    let mut two_two_accounts = vec![owner_account];
+    let mut two_two_accounts = vec![owner_account.clone()];
     for i in 0..4 {
         let new_account = two_two_accounts[i].derive_new_account();
         two_two_accounts.push(new_account);
     }
 
-    // #20 block
-    {
-        let height = 20;
-        let (livecell_cnt, txs_cnt) = get_livecellcnt_txcnt(height);
+    // #every block
+    for height in 20..10002 {
+        // #20 block
+        if (height == 20) || (height % MILLION_HEIGHT) == 0 {
+            debug!("preparing job at height:{}", height);
+            prepare_job_each_million(
+                &node,
+                &mut cellbase_account,
+                &mut owner_account,
+                &mut two_two_accounts,
+                &cell_dep,
+            );
+        } else {
+            debug!("processing txs and block at height:{}", height);
+            let (livecell_cnt, txs_cnt) = get_livecellcnt_txcnt(height);
 
-        // prepare live cell input
-        let block = node.new_block(None, None, None);
-        let live_cells_tx = gen_live_cells(
-            &genesis_block,
-            &mut cellbase_account,
-            livecell_cnt,
-            &cell_dep,
-        );
-        node.submit_transaction(&live_cells_tx);
+            let parent = node.get_tip_block();
+            let block = node.new_block(None, None, None);
+
+            let live_cells_tx = gen_live_cells(&parent, &mut cellbase_account, livecell_cnt, &cell_dep);
+            node.submit_transaction(&live_cells_tx);
+
+            let two_two_txs = create_two_two_txs(&parent, &mut two_two_accounts, txs_cnt, &cell_dep);
+
+            for tx in &two_two_txs {
+                node.submit_transaction(&tx);
+            }
+
+            let builder = block
+                .as_advanced_builder()
+                .transactions(vec![live_cells_tx])
+                .transactions(two_two_txs);
+
+            //disable verify, submit block
+            node.process_block_without_verify(&builder.build(), false);
+
+            // prepare for next transfer cell back
+            // turn [A, B, C, D] into [C, D, A, B], vice versa
+            two_two_accounts.swap(0, 2);
+            two_two_accounts.swap(1, 3);
+        }
+    }
+}
+
+/// preparation job at block #20 and each million block
+fn prepare_job_each_million(
+    node: &Node,
+    cellbase_account: &mut Account,
+    owner_account: &mut Account,
+    two_two_accounts: &mut Vec<Account>,
+    cell_dep: &Vec<CellDep>,
+) {
+    let parent_block = node.get_tip_block();
+    let current_height = parent_block.number() + 1;
+    let live_cells_tx: TransactionView;
+    let prepare_2in2out: TransactionView;
+
+    // double check if preparation job needs to be done
+    // at height #20 or at each million height
+    if (current_height != 20) && (current_height % MILLION_HEIGHT) != 0 {
+        return;
+    }
+
+    let (livecell_cnt, txs_cnt) = get_livecellcnt_txcnt(current_height + 1);
+
+    if current_height == 20 {
+        // prepare gen_live_cells
+        let genesis_block = node.get_block_by_number(0);
+        live_cells_tx = gen_live_cells(&genesis_block, cellbase_account, livecell_cnt, &cell_dep);
 
         // prepare 2in2out input cells
-        let prepare_2in2out =
-            prepare_two_two_txs(&node, true, &mut two_two_accounts, txs_cnt, &cell_dep);
-        node.submit_transaction(&prepare_2in2out);
+        prepare_2in2out = prepare_two_two_txs(
+            &node,
+            true,
+            owner_account,
+            two_two_accounts,
+            txs_cnt,
+            &cell_dep,
+        );
+    } else {
+        // prepare gen_live_cells
+        live_cells_tx = gen_live_cells(&parent_block, cellbase_account, livecell_cnt, &cell_dep);
 
-        let builder = block
-            .as_advanced_builder()
-            .transactions(vec![live_cells_tx, prepare_2in2out]);
-
-        // disable verify, submit block
-        node.process_block_without_verify(&builder.build(), false);
+        // prepare 2in2out input cells
+        prepare_2in2out = prepare_two_two_txs(
+            &node,
+            false,
+            owner_account,
+            two_two_accounts,
+            txs_cnt,
+            &cell_dep,
+        );
     }
+    node.submit_transaction(&live_cells_tx);
+    node.submit_transaction(&prepare_2in2out);
 
-    // #every block
-    for height in 21..23 {
-        println!("preparing txs at height:{}", height);
-        let (livecell_cnt, txs_cnt) = get_livecellcnt_txcnt(height);
+    let block = node.new_block(None, None, None);
+    let builder = block
+        .as_advanced_builder()
+        .transactions(vec![live_cells_tx, prepare_2in2out]);
 
-        let parent = node.get_tip_block();
-        let block = node.new_block(None, None, None);
-
-        let live_cells_tx = gen_live_cells(&parent, &mut cellbase_account, livecell_cnt, &cell_dep);
-        node.submit_transaction(&live_cells_tx);
-        println!("gen_live_cells txs are done");
-
-        let two_two_txs = create_two_two_txs(&parent, &mut two_two_accounts, txs_cnt, &cell_dep);
-
-        for tx in &two_two_txs {
-            println!("submit 2in2out tx!");
-            node.submit_transaction(&tx);
-        }
-        println!("2in2out txs are done");
-
-        let builder = block
-            .as_advanced_builder()
-            .transactions(vec![live_cells_tx])
-            .transactions(two_two_txs);
-
-        //disable verify, submit block
-        node.process_block_without_verify(&builder.build(), false);
-        println!("block at height {} are done", height);
-
-        // prepare for next transfer cell back
-        // turn [A, B, C, D] into [C, D, A, B], vice versa
-        two_two_accounts.swap(0, 2);
-        two_two_accounts.swap(1, 3);
-    }
+    node.process_block_without_verify(&builder.build(), false);
 }
 
 fn init_logger() -> ckb_logger_service::LoggerInitGuard {
