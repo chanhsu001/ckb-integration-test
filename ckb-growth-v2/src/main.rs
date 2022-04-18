@@ -21,6 +21,7 @@ use ckb_types::{
     prelude::*,
     H256,
 };
+use ckb_types::packed::Byte32;
 use clap::{Args, Parser, Subcommand};
 use lazy_static::lazy_static;
 
@@ -324,25 +325,31 @@ fn attach_witness(mut tx: TransactionView, signed_accounts: &[Account]) -> Trans
     tx
 }
 
+///Live Cell Parent Info: contains parent_block_height and parent_livecell_tx_hash
+#[derive(Debug)]
+pub struct LiveCellParentInfo(u64, Byte32);
+
 /// build 1in-Nout transaction to create N output_cell out of 1 input_cell on one account
 /// the 1st cell capacity is nearly equal to input cell, the other cells capacity is tiny
 pub fn gen_live_cells(
-    parent: &BlockView,
+    parent_info: &LiveCellParentInfo,
     account: &mut Account,
     livecell_cnt: u64,
     secp_cell_deps: &Vec<CellDep>,
 ) -> TransactionView {
+    let LiveCellParentInfo(parent_block_height, parent_livecell_tx_hash) = parent_info;
     let input = {
-        let txs = parent.transactions();
+        // let txs = parent.transactions();
 
         // if parent block is genesis, input cell is at tx_0 and len-1 index
-        if parent.is_genesis() {
-            let tx = txs.get(0).expect("get 1st live_cell transaction");
-            CellInput::new(OutPoint::new(tx.hash(), 7), 0)
+        if *parent_block_height == 0 {
+            // let tx = txs.get(0).expect("get 1st live_cell transaction");
+            CellInput::new(OutPoint::new(parent_livecell_tx_hash.clone(), 7), 0).as_builder().since(0_u64.pack()).build()
         } else {
             // the 2nd tx in parent block is input cell for this tx
-            let tx = txs.get(1).expect("get live_cell transaction");
-            CellInput::new(OutPoint::new(tx.hash(), 0), parent.header().number())
+            // let tx = txs.get(1).expect("get live_cell transaction");
+            // CellInput::new(OutPoint::new(parent_livecell_tx_hash, 0), parent.header().number())
+            CellInput::new(OutPoint::new(parent_livecell_tx_hash.clone(), 0), *parent_block_height).as_builder().since(0_u64.pack()).build()
         }
     };
 
@@ -489,9 +496,14 @@ fn prepare_two_two_txs(
     attach_witness(tx, &accounts)
 }
 
+///parent_info contains: parent_block_height and parent_block_2in2out_txs hash
+#[derive(Debug)]
+pub struct TwoTwoParentInfo(u64, Vec<Byte32>);
+
 /// create 2in2out tx in expansion mode
 pub fn create_two_two_txs(
-    parent: &BlockView,
+    // parent: &BlockView,
+    parent_info: &TwoTwoParentInfo,
     accounts: &mut Vec<Account>,
     txs_cnt: u64,
     secp_cell_deps: &Vec<CellDep>,
@@ -501,17 +513,23 @@ pub fn create_two_two_txs(
     //split accounts, [A, B, C, D] into [A, B] and [C, D]
     // [A, B] for 2 input cell of previous tx, and 2 output cells is locked by [C, D]
     let (input_acc, output_acc) = accounts.split_at(accounts.len() / 2);
-    let parent_block_number = parent.header().number();
+    let TwoTwoParentInfo(parent_height, parent_2nd_tx_hash) = parent_info;
 
     for tx_index in 0..txs_cnt as usize {
         let inputs = {
-            let p_txs = parent.transactions();
-            // the 2nd tx in parent block is input cell for this tx
-            let tx = p_txs.get(tx_index + 2).expect("get previous transaction");
-            vec![
-                CellInput::new(OutPoint::new(tx.hash(), 0), parent_block_number),
-                CellInput::new(OutPoint::new(tx.hash(), 1), parent_block_number),
-            ]
+            // let p_txs = parent.transactions();
+            // // the 2nd tx in parent block is input cell for this tx
+            // let tx = p_txs.get(tx_index + 2).expect("get previous transaction");
+            // vec![
+            //     CellInput::new(OutPoint::new(tx.hash(), 0), parent_block_number),
+            //     CellInput::new(OutPoint::new(tx.hash(), 1), parent_block_number),
+            // ]
+            unsafe {
+                vec![
+                    CellInput::new(OutPoint::new(parent_2nd_tx_hash.get_unchecked(tx_index).clone(), 0), *parent_height).as_builder().since(0_u64.pack()).build(),
+                    CellInput::new(OutPoint::new(parent_2nd_tx_hash.get_unchecked(tx_index).clone(), 1), *parent_height).as_builder().since(0_u64.pack()).build(),
+                ]
+            }
         };
 
         // we set fee_rate to zero
@@ -578,6 +596,8 @@ fn cmd_run(matches: &CmdRun) {
     }
 }
 
+const PATCH_BLOCKS_LEN: usize = 10;
+
 fn normal_expansion() {
     let node = Node::new(PathBuf::from("./"));
 
@@ -606,41 +626,63 @@ fn normal_expansion() {
         two_two_accounts.push(new_account);
     }
 
+    // perf: using Vec<Block> to hold blocks and patch commit
+    let mut commit_blocks = Vec::with_capacity(PATCH_BLOCKS_LEN);
+    let mut live_cell_parent_info: LiveCellParentInfo = LiveCellParentInfo(0_u64, Byte32::zero());
+    let mut two_two_parent_info: TwoTwoParentInfo = TwoTwoParentInfo(0_u64, vec![]);
+
     // #every block
     for height in 20..10002 {
         // #20 block
         if (height == 20) || (height % MILLION_HEIGHT) == 0 {
-            debug!("preparing job at height:{}", height);
+            info!("preparing job at height:{}", height);
             prepare_job_each_million(
                 &node,
                 &mut cellbase_account,
                 &mut owner_account,
                 &mut two_two_accounts,
                 &cell_dep,
+                &mut live_cell_parent_info,
+                &mut two_two_parent_info,
             );
         } else {
-            debug!("processing txs and block at height:{}", height);
             let (livecell_cnt, txs_cnt) = get_livecellcnt_txcnt(height);
 
-            let parent = node.get_tip_block();
-            let block = node.new_block(None, None, None);
+            // let parent = node.get_tip_block();
+            // let block = node.new_block(None, None, None);
 
-            let live_cells_tx = gen_live_cells(&parent, &mut cellbase_account, livecell_cnt, &cell_dep);
-            node.submit_transaction(&live_cells_tx);
+            let live_cells_tx = gen_live_cells(&live_cell_parent_info, &mut cellbase_account, livecell_cnt, &cell_dep);
+            let live_cells_tx_hash = node.submit_transaction(&live_cells_tx);
+            live_cell_parent_info = LiveCellParentInfo(height, live_cells_tx_hash);
 
-            let two_two_txs = create_two_two_txs(&parent, &mut two_two_accounts, txs_cnt, &cell_dep);
+            let two_two_txs = create_two_two_txs(&two_two_parent_info, &mut two_two_accounts, txs_cnt, &cell_dep);
 
+            let mut two_two_tx_hash: Vec<Byte32> = vec![];
             for tx in &two_two_txs {
-                node.submit_transaction(&tx);
+                two_two_tx_hash.push(node.submit_transaction(&tx));
             }
+            two_two_parent_info = TwoTwoParentInfo(height, two_two_tx_hash);
 
-            let builder = block
-                .as_advanced_builder()
-                .transactions(vec![live_cells_tx])
-                .transactions(two_two_txs);
+            if true {
+                commit_blocks.push((live_cells_tx, two_two_txs));
+                if commit_blocks.len() == PATCH_BLOCKS_LEN {
+                    //batch building and committing block
+                    for i in 0..commit_blocks.len() {
+                        let (live_cells_tx, two_two_txs) = commit_blocks.get(i).unwrap();
+                        let block = node.new_block(None, None, None);
+                        let builder = block
+                            .as_advanced_builder()
+                            .transactions(vec![live_cells_tx.clone()])
+                            .transactions(two_two_txs.clone());
 
-            //disable verify, submit block
-            node.process_block_without_verify(&builder.build(), false);
+                        node.process_block_without_verify(&builder.build(), false);
+                    }
+                    commit_blocks.truncate(0);
+                }
+            } else {
+                //disable verify, submit block
+                // node.process_block_without_verify(&builder.build(), false);
+            }
 
             // prepare for next transfer cell back
             // turn [A, B, C, D] into [C, D, A, B], vice versa
@@ -657,6 +699,8 @@ fn prepare_job_each_million(
     owner_account: &mut Account,
     two_two_accounts: &mut Vec<Account>,
     cell_dep: &Vec<CellDep>,
+    live_cell_parent_info: &mut LiveCellParentInfo,
+    two_two_parent_info: &mut TwoTwoParentInfo,
 ) {
     let parent_block = node.get_tip_block();
     let current_height = parent_block.number() + 1;
@@ -674,7 +718,9 @@ fn prepare_job_each_million(
     if current_height == 20 {
         // prepare gen_live_cells
         let genesis_block = node.get_block_by_number(0);
-        live_cells_tx = gen_live_cells(&genesis_block, cellbase_account, livecell_cnt, &cell_dep);
+        // live_cells_tx = gen_live_cells(&genesis_block, cellbase_account, livecell_cnt, &cell_dep);
+        let gen_live_hash = genesis_block.transactions().get(0).unwrap().hash();
+        live_cells_tx = gen_live_cells(&LiveCellParentInfo(0, gen_live_hash), cellbase_account, livecell_cnt, &cell_dep);
 
         // prepare 2in2out input cells
         prepare_2in2out = prepare_two_two_txs(
@@ -686,8 +732,10 @@ fn prepare_job_each_million(
             &cell_dep,
         );
     } else {
+        let txs = node.get_tip_block().transactions();
+        let gen_live_hash = txs.get(1).unwrap();
         // prepare gen_live_cells
-        live_cells_tx = gen_live_cells(&parent_block, cellbase_account, livecell_cnt, &cell_dep);
+        live_cells_tx = gen_live_cells(&LiveCellParentInfo(parent_block.number(), gen_live_hash.hash()), cellbase_account, livecell_cnt, &cell_dep);
 
         // prepare 2in2out input cells
         prepare_2in2out = prepare_two_two_txs(
@@ -699,8 +747,13 @@ fn prepare_job_each_million(
             &cell_dep,
         );
     }
-    node.submit_transaction(&live_cells_tx);
-    node.submit_transaction(&prepare_2in2out);
+    let live_cell_tx_hash = node.submit_transaction(&live_cells_tx);
+    let two_two_tx_hash = node.submit_transaction(&prepare_2in2out);
+
+    live_cell_parent_info.0 = current_height;
+    live_cell_parent_info.1 = live_cell_tx_hash;
+    two_two_parent_info.0 = current_height;
+    two_two_parent_info.1 = vec![two_two_tx_hash];
 
     let block = node.new_block(None, None, None);
     let builder = block
