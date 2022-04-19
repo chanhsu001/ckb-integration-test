@@ -1,6 +1,6 @@
 use ckb_network::bytes::Bytes;
 use ckb_types::{
-    core::{BlockNumber, BlockView, EpochNumberWithFraction, HeaderView, TransactionView},
+    core::{BlockView, EpochNumberWithFraction, HeaderView, TransactionView},
     packed::{
         BlockTransactions, Byte32, CompactBlock, GetBlocks, RelayMessage, RelayTransaction,
         RelayTransactionHashes, RelayTransactions, SendBlock, SendHeaders, SyncMessage,

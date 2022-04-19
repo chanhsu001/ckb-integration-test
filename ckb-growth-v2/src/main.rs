@@ -1,16 +1,17 @@
 extern crate core;
 
 use std::env;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::panic;
 use std::path::PathBuf;
 use std::process::exit;
 
 use ckb_chain_spec::consensus::TYPE_ID_CODE_HASH;
-use ckb_crypto::secp::{Privkey, Pubkey};
+use ckb_crypto::secp::Privkey;
 use ckb_hash::{blake2b_256, new_blake2b};
 use ckb_jsonrpc_types::CellWithStatus;
-use ckb_logger::{debug, info};
-use ckb_logger::internal::log;
+use ckb_logger::debug;
 use ckb_system_scripts::BUNDLED_CELL;
 use ckb_types::core::DepType;
 use ckb_types::{
@@ -23,6 +24,7 @@ use ckb_types::{
 };
 use clap::{Args, Parser, Subcommand};
 use lazy_static::lazy_static;
+use serde::{Deserialize, Serialize};
 
 use ckb_growth::MAX_TXS_IN_NORMAL_MODE;
 
@@ -66,6 +68,14 @@ pub struct CmdRun {
     #[clap(short, long)]
     /// maximum mode data expansion in 1 year
     maximum_expansion: bool,
+
+    #[clap(short, long, default_value_t = 0)]
+    /// Specifies ckb growth start `from` block number
+    from: u64,
+
+    #[clap(short, long, default_value_t = 16_000_000)]
+    /// Specifies ckb growth halt after commit the block of `to` number
+    to: u64,
 }
 
 lazy_static! {
@@ -91,16 +101,6 @@ lazy_static! {
             .build();
         (cell, data)
     };
-}
-
-/// wrong version: get lock_args of the account public key
-fn get_lock_args(public_key: &Pubkey) -> Script {
-    let (_, data) = secp_data_cell();
-    Script::new_builder()
-        .code_hash(CellOutput::calc_data_hash(&data))
-        .args(Bytes::from(public_key.serialize())[0..20].pack())
-        .hash_type(ScriptHashType::Type.into())
-        .build()
 }
 
 /// correct version: get lock_args of the account public key
@@ -154,6 +154,13 @@ pub struct Account {
     cell_cap: u64,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AccountCellCap {
+    cellbase_cap: u64,
+    owner_cap: u64,
+    owner_derived_cap: (u64, u64, u64),
+}
+
 impl Account {
     pub fn new(private_key: H256, cell_cap: u64) -> Self {
         let private_key = Privkey::from(private_key);
@@ -201,7 +208,8 @@ impl std::fmt::Display for Account {
 // const MIN_FEE_RATE: u64 = 1_000;
 // disable FEE_RATE for simplification
 const MIN_FEE_RATE: u64 = 0;
-const MIN_CELL_CAP: u64 = 90_00_000_000;
+const MIN_CELL_CAP: u64 = 9_000_000_000;
+const TWO_TWO_START_HEIGHT: u64 = 20;
 const MILLION_HEIGHT: u64 = 1_000_000;
 
 type MillionHeight = u64;
@@ -227,24 +235,40 @@ static NORMAL_PHASE_CELLS_TXS_CNT: [(MillionHeight, LiveCellCnt, TxCnt); 15] = [
 ];
 
 /// maximum mode, each million height, one block contains how many live_cells and 2in2out tx
-static MAX_PHASE_CELLS_TXS_CNT: [(MillionHeight, LiveCellCnt, TxCnt); 7] = [
+static MAX_PHASE_CELLS_TXS_CNT: [(MillionHeight, LiveCellCnt, TxCnt); 10] = [
     (1, 1, 1),
     (2, 2, 1),
     (3, 1, 1),
     (4, 2, 2),
-    (5, 2, 1),
-    (6, 1, 1),
-    (7, 1, 1),
+    (5, 2, 2),
+    (6, 3, 2),
+    (7, 3, 3),
+    (8, 4, 1000),
+    (9, 4, 1000),
+    (10, 5, 1000),
 ];
 
 /// return each block should contains livecells count and transfer-txs count at specific height
-fn get_livecellcnt_txcnt(height: u64) -> (LiveCellCnt, TxCnt) {
-    for (million_height, livecell_cnt, txs_cnt) in NORMAL_PHASE_CELLS_TXS_CNT.iter() {
-        if height < million_height * 1000000 {
-            return (*livecell_cnt, *txs_cnt);
+fn get_livecellcnt_txcnt(mode: ExpansionMode, height: u64) -> (LiveCellCnt, TxCnt) {
+    if mode == ExpansionMode::NormalMode {
+        for (n, livecell_cnt, txs_cnt) in NORMAL_PHASE_CELLS_TXS_CNT.iter() {
+            if height < n * MILLION_HEIGHT {
+                return (*livecell_cnt, *txs_cnt);
+            }
         }
+        // reach end
+        let (_, livecell_cnt, txs_cnt) = NORMAL_PHASE_CELLS_TXS_CNT.last().unwrap();
+        (*livecell_cnt, *txs_cnt)
+    } else {
+        for (n, livecell_cnt, txs_cnt) in MAX_PHASE_CELLS_TXS_CNT.iter() {
+            if height < n * MILLION_HEIGHT {
+                return (*livecell_cnt, *txs_cnt);
+            }
+        }
+        // reach end
+        let (_, livecell_cnt, txs_cnt) = MAX_PHASE_CELLS_TXS_CNT.last().unwrap();
+        (*livecell_cnt, *txs_cnt)
     }
-    panic!("not possible to mis-match!");
 }
 
 /// get secp256k1 sighash CellDeps
@@ -360,13 +384,10 @@ pub fn gen_live_cells(
         .expect("sub live cells capacity");
     account.cell_cap = rest.as_u64();
 
-    let mut outputs = vec![];
-    outputs.push(
-        CellOutput::new_builder()
-            .capacity(rest.as_u64().pack())
-            .lock(account.lock_args.clone())
-            .build(),
-    );
+    let mut outputs = vec![CellOutput::new_builder()
+        .capacity(rest.as_u64().pack())
+        .lock(account.lock_args.clone())
+        .build()];
     (0..livecell_cnt).for_each(|_| {
         outputs.push(
             CellOutput::new_builder()
@@ -399,7 +420,7 @@ fn prepare_two_two_txs(
     node: &Node,
     if_first: bool,
     owner_account: &mut Account,
-    accounts: &mut Vec<Account>,
+    accounts: &mut [Account],
     txs_cnt: u64,
     secp_cell_deps: &Vec<CellDep>,
 ) -> TransactionView {
@@ -420,17 +441,23 @@ fn prepare_two_two_txs(
         );
         input = CellInput::new(OutPoint::new(tx.hash(), 8), 0);
     } else {
-        // Todo: not test yet
-        let previous_million_block = node.get_block_by_number(curr_height - MILLION_HEIGHT);
+        // Todo: replace with CellInput pushed in Vec when create, pop it when be used
+        let previous_million_block = {
+            if curr_height == MILLION_HEIGHT {
+                node.get_block_by_number(TWO_TWO_START_HEIGHT)
+            } else {
+                node.get_block_by_number(curr_height - MILLION_HEIGHT)
+            }
+        };
         let txs = previous_million_block.transactions();
-        let tx = txs.get(txs.len() - 1).expect("get last tx");
-        let output_index = tx.outputs().len() - 1;
+        let tx = txs.last().expect("get last tx");
+        let last_output = tx.outputs().len() - 1;
         cell = node.rpc_client().get_live_cell(
-            ckb_jsonrpc_types::OutPoint::from(OutPoint::new(tx.hash(), output_index as u32)),
+            ckb_jsonrpc_types::OutPoint::from(OutPoint::new(tx.hash(), last_output as u32)),
             true,
         );
         input = CellInput::new(
-            OutPoint::new(tx.hash(), output_index as u32),
+            OutPoint::new(tx.hash(), last_output as u32),
             previous_million_block.header().number(),
         );
     }
@@ -455,16 +482,14 @@ fn prepare_two_two_txs(
 
     for _ in 0..txs_cnt {
         let (input_accounts, _) = accounts.split_at(accounts.len() / 2);
-        (0..2 as usize)
-            .zip(input_accounts)
-            .for_each(|(_, account)| {
-                outputs.push(
-                    CellOutput::new_builder()
-                        .capacity(MIN_CELL_CAP.pack())
-                        .lock(account.lock_args.clone())
-                        .build(),
-                );
-            });
+        (0..2_usize).zip(input_accounts).for_each(|(_, account)| {
+            outputs.push(
+                CellOutput::new_builder()
+                    .capacity(MIN_CELL_CAP.pack())
+                    .lock(account.lock_args.clone())
+                    .build(),
+            );
+        });
     }
     outputs.push(
         CellOutput::new_builder()
@@ -492,7 +517,7 @@ fn prepare_two_two_txs(
 /// create 2in2out tx in expansion mode
 pub fn create_two_two_txs(
     parent: &BlockView,
-    accounts: &mut Vec<Account>,
+    accounts: &mut [Account],
     txs_cnt: u64,
     secp_cell_deps: &Vec<CellDep>,
 ) -> Vec<TransactionView> {
@@ -506,12 +531,28 @@ pub fn create_two_two_txs(
     for tx_index in 0..txs_cnt as usize {
         let inputs = {
             let p_txs = parent.transactions();
-            // the 2nd tx in parent block is input cell for this tx
-            let tx = p_txs.get(tx_index + 2).expect("get previous transaction");
-            vec![
-                CellInput::new(OutPoint::new(tx.hash(), 0), parent_block_number),
-                CellInput::new(OutPoint::new(tx.hash(), 1), parent_block_number),
-            ]
+            if parent_block_number % MILLION_HEIGHT == 0 {
+                // if current block is #21 or #million+1
+                // the 2nd tx in parent block is input cell for two_two txs
+                let tx = p_txs.last().expect("get previous transaction");
+                vec![
+                    CellInput::new(
+                        OutPoint::new(tx.hash(), (2 * tx_index) as u32),
+                        parent_block_number,
+                    ),
+                    CellInput::new(
+                        OutPoint::new(tx.hash(), (2 * tx_index + 1) as u32),
+                        parent_block_number,
+                    ),
+                ]
+            } else {
+                // from the 2nd..to End tx in parent block is input cell for two_two txs
+                let tx = p_txs.get(tx_index + 2).expect("get previous transaction");
+                vec![
+                    CellInput::new(OutPoint::new(tx.hash(), 0), parent_block_number),
+                    CellInput::new(OutPoint::new(tx.hash(), 1), parent_block_number),
+                ]
+            }
         };
 
         // we set fee_rate to zero
@@ -552,52 +593,118 @@ pub fn create_two_two_txs(
     txs
 }
 
-fn main() {
+fn main() -> std::io::Result<()> {
     let _logger = init_logger();
     let cli = CkbGrowth::parse();
 
-    return match &cli.sub_command {
+    match &cli.sub_command {
         GrowthSubCommand::Run(matches) => cmd_run(matches),
-    };
+    }
 }
 
-fn cmd_run(matches: &CmdRun) {
+#[derive(Clone, Copy, PartialEq)]
+enum ExpansionMode {
+    NormalMode,
+    MaximumMode,
+}
+
+fn cmd_run(matches: &CmdRun) -> std::io::Result<()> {
     let normal_mode = matches.normal_expansion;
     let maximum_mode = matches.maximum_expansion;
+    let from = matches.from;
+    let to = matches.to;
 
-    if normal_mode == false && maximum_mode == false {
-        eprintln!("must specific expansion mode: normal or maximum");
+    if !normal_mode && !maximum_mode {
+        eprintln!("need specific expansion mode: normal or maximum");
         exit(-1);
     }
-    if normal_mode == true {
+    if normal_mode && maximum_mode {
+        eprintln!("cannot use both mode, choose one expansion mode: normal or maximum");
+        exit(-1);
+    }
+    if to < from {
+        eprintln!("--to End_Block_Number, cannot less than --from Start_Block_Number");
+        exit(-1);
+    }
+    if from != 0 && from < 20 {
+        eprintln!("cannot specify `from` in 1..20");
+        exit(-1);
+    }
+
+    let mode = {
+        if normal_mode {
+            ExpansionMode::NormalMode
+        } else {
+            ExpansionMode::MaximumMode
+        }
+    };
+
+    if normal_mode {
         println!("normal mode in 5 years data expansion");
-        normal_expansion();
     } else {
         println!("maximum mode in 1 years data expansion");
-        //maximum_expansion();
     }
+
+    expansion(mode, from, to)?;
+    Ok(())
 }
 
-fn normal_expansion() {
+fn expansion(mode: ExpansionMode, from: u64, to: u64) -> std::io::Result<()> {
     let node = Node::new(PathBuf::from("./"));
 
-    let genesis_block = node.get_tip_block();
+    let genesis_block = node.get_block_by_number(0);
     let cell_dep = secp256k1_cell_dep(&genesis_block);
-    mine(&node, 19);
+
+    let tip = node.get_tip_block_number();
+    if (from == 0 && from != tip) || (from != 0 && from != (tip + 1)) {
+        eprintln!(
+            "generate blocks from {}, but mis-match with current tip {}",
+            from, tip
+        );
+        exit(-1)
+    }
+    if to % MILLION_HEIGHT != 0 {
+        eprintln!("--to {}, should be divided by 1 million whole ", to);
+        exit(-1)
+    }
+
+    // mine first 19 blocks if generate from beginning
+    let block_range = {
+        if from == 0 {
+            mine(&node, 19);
+            20..=to
+        } else {
+            from..=to
+        }
+    };
 
     // the account embedded accounts in Dev chain
     // account for live cells generation
     let mut cellbase_account = Account::new(
         h256!("0xd00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb97593d2bc"),
-        20_000_000_000_00000000,
+        2_000_000_000_000_000_000,
     );
 
     // the account embedded accounts in Dev chain
     // base account, derive more accounts for building 2in2out tx
     let mut owner_account = Account::new(
         h256!("0x63d86723e08f0f813a36ce6aa123bb2289d90680ae1e99d4de8cdb334553f24d"),
-        5_198_735_037_00000000,
+        519_873_503_700_000_000,
     );
+
+    //load account cell capacity info from serialization file if --from is not 0
+    if from != 0 {
+        let mut f = OpenOptions::new()
+            .read(true)
+            .open("account_cellcap.dat")
+            .expect("load account cell cap file error");
+        let mut cap_data = String::new();
+        f.read_to_string(&mut cap_data)?;
+        let cellcap: AccountCellCap =
+            serde_json::from_str(cap_data.as_str()).expect("Deserialised from account_cellcap.dat");
+        cellbase_account.cell_cap = cellcap.cellbase_cap;
+        owner_account.cell_cap = cellcap.owner_cap;
+    }
 
     // prepare 4 accounts and put them into 2in2out_accounts
     let mut two_two_accounts = vec![owner_account.clone()];
@@ -606,33 +713,37 @@ fn normal_expansion() {
         two_two_accounts.push(new_account);
     }
 
-    // #every block
-    for height in 20..10002 {
-        // #20 block
+    let (mut livecell_cnt, mut txs_cnt) = get_livecellcnt_txcnt(mode, *block_range.start());
+
+    for height in block_range {
+        // prepare check point
         if (height == 20) || (height % MILLION_HEIGHT) == 0 {
             debug!("preparing job at height:{}", height);
             prepare_job_each_million(
+                mode,
                 &node,
                 &mut cellbase_account,
                 &mut owner_account,
                 &mut two_two_accounts,
                 &cell_dep,
             );
-        } else {
-            debug!("processing txs and block at height:{}", height);
-            let (livecell_cnt, txs_cnt) = get_livecellcnt_txcnt(height);
 
+            // update livecell count and 2in2out txs count for next million
+            (livecell_cnt, txs_cnt) = get_livecellcnt_txcnt(mode, height + 1);
+
+            // save account info at every million height
+            save_account_cellcap_to_file(&cellbase_account, &owner_account, &two_two_accounts)?;
+        } else {
             let parent = node.get_tip_block();
             let block = node.new_block(None, None, None);
 
-            let live_cells_tx = gen_live_cells(&parent, &mut cellbase_account, livecell_cnt, &cell_dep);
-            node.submit_transaction(&live_cells_tx);
+            debug!("processing txs and block at height:{}", height);
 
-            let two_two_txs = create_two_two_txs(&parent, &mut two_two_accounts, txs_cnt, &cell_dep);
+            let live_cells_tx =
+                gen_live_cells(&parent, &mut cellbase_account, livecell_cnt, &cell_dep);
 
-            for tx in &two_two_txs {
-                node.submit_transaction(&tx);
-            }
+            let two_two_txs =
+                create_two_two_txs(&parent, &mut two_two_accounts, txs_cnt, &cell_dep);
 
             let builder = block
                 .as_advanced_builder()
@@ -643,19 +754,53 @@ fn normal_expansion() {
             node.process_block_without_verify(&builder.build(), false);
 
             // prepare for next transfer cell back
-            // turn [A, B, C, D] into [C, D, A, B], vice versa
-            two_two_accounts.swap(0, 2);
-            two_two_accounts.swap(1, 3);
+            revert_two_two_accounts(&mut two_two_accounts);
         }
     }
+
+    Ok(())
+}
+
+/// turn [A, B, C, D] into [C, D, A, B], vice versa
+fn revert_two_two_accounts(two_two_accounts: &mut [Account]) {
+    two_two_accounts.swap(0, 2);
+    two_two_accounts.swap(1, 3);
+}
+
+/// save account cellcap info to file at every million height
+/// in case of pause and re-run
+fn save_account_cellcap_to_file(
+    cellbase_account: &Account,
+    owner_account: &Account,
+    two_two_accounts: &[Account],
+) -> std::io::Result<()> {
+    // serialize account cell cap info into file
+    let cellcap = AccountCellCap {
+        cellbase_cap: cellbase_account.cell_cap,
+        owner_cap: owner_account.cell_cap,
+        owner_derived_cap: (
+            two_two_accounts[1].cell_cap,
+            two_two_accounts[2].cell_cap,
+            two_two_accounts[3].cell_cap,
+        ),
+    };
+    let content = serde_json::to_string(&cellcap).expect("erialize account cell cap");
+    let mut save = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .open("account_cellcap.dat")
+        .expect("load account cell cap file error");
+    save.write_all(content.as_ref())?;
+    Ok(())
 }
 
 /// preparation job at block #20 and each million block
 fn prepare_job_each_million(
+    mode: ExpansionMode,
     node: &Node,
     cellbase_account: &mut Account,
     owner_account: &mut Account,
-    two_two_accounts: &mut Vec<Account>,
+    two_two_accounts: &mut [Account],
     cell_dep: &Vec<CellDep>,
 ) {
     let parent_block = node.get_tip_block();
@@ -669,38 +814,40 @@ fn prepare_job_each_million(
         return;
     }
 
-    let (livecell_cnt, txs_cnt) = get_livecellcnt_txcnt(current_height + 1);
+    let (livecell_cnt, txs_cnt) = get_livecellcnt_txcnt(mode, current_height + 1);
 
     if current_height == 20 {
         // prepare gen_live_cells
         let genesis_block = node.get_block_by_number(0);
-        live_cells_tx = gen_live_cells(&genesis_block, cellbase_account, livecell_cnt, &cell_dep);
+        live_cells_tx = gen_live_cells(&genesis_block, cellbase_account, livecell_cnt, cell_dep);
 
         // prepare 2in2out input cells
         prepare_2in2out = prepare_two_two_txs(
-            &node,
+            node,
             true,
             owner_account,
             two_two_accounts,
             txs_cnt,
-            &cell_dep,
+            cell_dep,
         );
     } else {
         // prepare gen_live_cells
-        live_cells_tx = gen_live_cells(&parent_block, cellbase_account, livecell_cnt, &cell_dep);
+        live_cells_tx = gen_live_cells(&parent_block, cellbase_account, livecell_cnt, cell_dep);
+
+        // revert two_two_accounts when at million height
+        // so make it as [A, B, C, D] as original, for function pause/re-run
+        revert_two_two_accounts(two_two_accounts);
 
         // prepare 2in2out input cells
         prepare_2in2out = prepare_two_two_txs(
-            &node,
+            node,
             false,
             owner_account,
             two_two_accounts,
             txs_cnt,
-            &cell_dep,
+            cell_dep,
         );
     }
-    node.submit_transaction(&live_cells_tx);
-    node.submit_transaction(&prepare_2in2out);
 
     let block = node.new_block(None, None, None);
     let builder = block
@@ -713,7 +860,7 @@ fn prepare_job_each_million(
 fn init_logger() -> ckb_logger_service::LoggerInitGuard {
     let filter = match env::var("RUST_LOG") {
         Ok(filter) if filter.is_empty() => Some("info".to_string()),
-        Ok(filter) => Some(filter.to_string()),
+        Ok(filter) => Some(filter),
         Err(_) => Some("info".to_string()),
     };
     let config = ckb_logger_config::Config {
