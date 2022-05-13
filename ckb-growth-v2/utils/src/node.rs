@@ -7,11 +7,7 @@ use ckb_jsonrpc_types::TxPoolInfo;
 use ckb_logger::{debug, error};
 use ckb_resource::Resource;
 use ckb_types::{
-    bytes,
-    core::{
-        BlockBuilder, BlockNumber, BlockView, HeaderView,
-        TransactionView,
-    },
+    core::{BlockBuilder, BlockNumber, BlockView, HeaderView, TransactionView},
     packed::{Block, Byte32},
     prelude::*,
 };

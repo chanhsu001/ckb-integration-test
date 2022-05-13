@@ -1,3 +1,5 @@
+use crate::node::Node;
+use ckb_jsonrpc_types::Status;
 use ckb_network::bytes::Bytes;
 use ckb_types::{
     core::{BlockView, EpochNumberWithFraction, HeaderView, TransactionView},
@@ -8,17 +10,15 @@ use ckb_types::{
     prelude::*,
 };
 use core::sync::atomic::Ordering::SeqCst;
+use lazy_static::lazy_static;
 use std::convert::Into;
 use std::env;
 use std::fs::read_to_string;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpListener};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU16;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use ckb_jsonrpc_types::Status;
-use lazy_static::lazy_static;
-use crate::node::Node;
-use std::sync::atomic::AtomicU16;
 
 lazy_static! {
     pub static ref PORT_COUNTER: AtomicU16 = AtomicU16::new(9000);
